@@ -1,0 +1,7 @@
+#!/bin/sh
+cd server
+make "$@"
+cd ..
+cd client
+make "$@"
+cd ..

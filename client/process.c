@@ -880,7 +880,9 @@ void process_alloc(mt_server *server, mt_process *process, mt_msg *mt_msg, void 
 
 	process = process_clone_of(process);
 
-fprintf(stderr, "%s operation %s(%d) (%#lx, %#lx) size:%lu\n", __FUNCTION__, str_operation(mt_msg->operation), mt_msg->operation, old_ptr, new_ptr, size);
+#if 0
+	fprintf(stderr, "%s operation %s(%d) (%#lx, %#lx) size:%lu\n", __FUNCTION__, str_operation(mt_msg->operation), mt_msg->operation, old_ptr, new_ptr, size);
+#endif
 	if (old_ptr) {
 		if (mt_msg->operation == MT_MUNMAP) {
 			if (old_ptr & page_mask)

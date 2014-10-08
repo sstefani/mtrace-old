@@ -1,4 +1,6 @@
 /*
+ * header file for process jobs
+ *
  * Copyright (C) 2014 Stefani Seibold <stefani@seibold.net>
  *
  * sponsored by Rohde & Schwarz GmbH & Co. KG

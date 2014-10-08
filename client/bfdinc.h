@@ -1,4 +1,7 @@
 /*
+ * helper header for using bfd.h
+ *  bfd.h needs a definiton of PACKAGE and PACKAGE_VERSION
+ *
  * Copyright (C) 2014 Stefani Seibold <stefani@seibold.net>
  *
  * sponsored by Rohde & Schwarz GmbH & Co. KG
@@ -16,7 +19,6 @@
 
 #ifndef BIN_INC_H
 #define BIN_INC_H
-
 
 #define PACKAGE "binfile"
 #define PACKAGE_VERSION "1.0"

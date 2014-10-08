@@ -1,4 +1,6 @@
 /*
+ * main() function and base functions
+ *
  * Copyright (C) 2014 Stefani Seibold <stefani@seibold.net>
  *
  * sponsored by Rohde & Schwarz GmbH & Co. KG

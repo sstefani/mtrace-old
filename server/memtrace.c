@@ -655,12 +655,12 @@ void *realloc(void *ptr, size_t size)
 
 	++in_trace;
 
+	mt_call(MT_FREE, ptr, 0);
+
 	result = old_realloc(ptr, size);
 	if (result) {
-		if (in_trace == 1 && mt_check()) {
-			mt_call_with_backtrace(2, MT_FREE, ptr, 0);
+		if (in_trace == 1 && mt_check())
 			mt_call_with_backtrace(2, MT_REALLOC, result, size);
-		}
 	}
 
 	--in_trace;
@@ -727,7 +727,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 	return result;
 }
 
-void *mmap64(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+void *mmap64(void *addr, size_t length, int prot, int flags, int fd, __off64_t offset)
 {
 	void *result;
 

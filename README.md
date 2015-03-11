@@ -39,8 +39,8 @@ The preloaded library libmemtrace.so intercepts the following GLIBC calls:
 - execve()
 - exit()
 
-The new() method is using malloc(), so memory allocations of a C++ application
-can be also traced.
+The operator new() method is using malloc(), so memory allocations of a C++
+application can also be traced.
 
 Tracing child process it currently not full implemented, but will be one of the
 next steps.

@@ -46,7 +46,7 @@ struct io_watch_event {
 
 struct cmd_opt {
 	const char *name;
-	int match_len;
+	unsigned int match_len;
 	void *data;
 	const char *info;
 	const char *usage;
@@ -67,10 +67,8 @@ static int do_show(struct cmd_opt *cmd, int argc, const char *argv[]);
 static int do_status(struct cmd_opt *cmd, int argc, const char *argv[]);
 static int do_start(struct cmd_opt *cmd, int argc, const char *argv[]);
 static int do_stop(struct cmd_opt *cmd, int argc, const char *argv[]);
-static int do_set_prompt(struct cmd_opt *cmd, struct cmd_opt *opt, int argc, const char *argv[]);
 static int do_set_searchpath(struct cmd_opt *cmd, struct cmd_opt *opt, int argc, const char *argv[]);
 static int do_show_info(struct cmd_opt *cmd, struct cmd_opt *opt, int argc, const char *argv[]);
-static int do_show_prompt(struct cmd_opt *cmd, struct cmd_opt *opt, int argc, const char *argv[]);
 static int do_show_searchpath(struct cmd_opt *cmd, struct cmd_opt *opt, int argc, const char *argv[]);
 
 const char dump_str[] = "dump";
@@ -107,14 +105,12 @@ static struct cmd_opt dump_opts[] = {
 };
 
 static struct cmd_opt set_opts[] = {
-	{ "prompt", 1, do_set_prompt, "switch dump prompt on/off" },
 	{ "searchpath", 1, do_set_searchpath, "set searchpath for binaries and libraries" },
 	{ },
 };
 
 static struct cmd_opt show_opts[] = {
 	{ "info", 1, do_show_info, "show server settings" },
-	{ "prompt", 1, do_show_prompt, "dump prompt" },
 	{ "searchpath", 1, do_show_searchpath, "show searchpath for binaries and libraries" },
 	{ },
 };
@@ -484,7 +480,7 @@ static void readline_handler(char *line)
 	unsigned int n;
 	const char **argv = NULL;
 	unsigned int argv_size = 8;
-	int argc;
+	unsigned int argc;
 	char *linedup;
 	char *s;
 
@@ -567,8 +563,12 @@ static void readline_handler(char *line)
 
 		for(i = 0; i != ARRAY_SIZE(cmds) - 1; ++i) {
 			if (n >= cmds[i].match_len && !strncmp(argv[0], cmds[i].name, n)) {
-				if (((cmd_call)cmds[i].data)(&cmds[i], argc, argv) >= 0)
-					add_history(line);
+				if (((cmd_call)cmds[i].data)(&cmds[i], argc, argv) >= 0) {
+					HIST_ENTRY *entry = history_get(history_base + history_length - 1);
+
+					if (!entry || strcmp(entry->line, line))
+						add_history(line);
+				}
 				goto finish;
 			}
 		}
@@ -657,32 +657,6 @@ static int do_set_searchpath(struct cmd_opt *cmd, struct cmd_opt *opt, int argc,
 	return 0;
 }
 
-static int do_set_prompt(struct cmd_opt *cmd, struct cmd_opt *opt, int argc, const char *argv[])
-{
-	if (argc < 3) {
-		fprintf(stderr, "%s: missing option argument for '%s'\n", cmd->name, opt->name);
-		return -1;
-	}
-	
-	if (argc > 3) {
-		fprintf(stderr, "%s: too many option argument for '%s'\n", cmd->name, opt->name);
-		return -1;
-	}
-
-	if (!strcmp(argv[2], "on")) {
-		dump_prompt(1);
-		return 0;
-	}
-
-	if (!strcmp(argv[2], "off")) {
-		dump_prompt(0);
-		return 0;
-	}
-
-	fprintf(stderr, "%s: invalid option argument '%s' for '%s'\n", cmd->name, argv[2], opt->name);
-	return -1;
-}
-
 static int do_show_info(struct cmd_opt *cmd, struct cmd_opt *opt, int argc, const char *argv[])
 {
 	if (argc > 2) {
@@ -691,17 +665,6 @@ static int do_show_info(struct cmd_opt *cmd, struct cmd_opt *opt, int argc, cons
 	}
 
 	get_info(server);
-	return 0;
-}
-
-static int do_show_prompt(struct cmd_opt *cmd, struct cmd_opt *opt, int argc, const char *argv[])
-{
-	if (argc > 2) {
-		fprintf(stderr, "%s: too many option argument for '%s'\n", cmd->name, opt->name);
-		return -1;
-	}
-
-	printf("%s=%s\n", opt->name, dump_prompt(-1) ? "on" : "off");
 	return 0;
 }
 
@@ -733,10 +696,21 @@ static int do_show_searchpath(struct cmd_opt *cmd, struct cmd_opt *opt, int argc
 	return 0;
 }
 
-static int show_process_pid(mt_process *process)
+static mt_process *get_process(const char *arg)
 {
-	printf(" %d", process->pid);
-	return 0;
+	mt_process *process;
+
+	if (!arg) {
+		process = server_first_process(server);
+		if (!process)
+			fprintf(stderr, "no process available\n");
+	}
+	else {
+		process = server_find_process(server, atoi(arg));
+		if (!process)
+			fprintf(stderr, "process %s not found\n", arg);
+	}
+	return process;
 }
 
 static int do_dump(struct cmd_opt *cmd, int argc, const char *argv[])
@@ -747,14 +721,14 @@ static int do_dump(struct cmd_opt *cmd, int argc, const char *argv[])
 	unsigned int i;
 	void *data;
 
-	process = server_first_process(server);
-	if (!process) {
-		fprintf(stderr, "no process available\n");
-		return -1;
+	if (!argv[1]) {
+		process = server_first_process(server);
+		if (!process) {
+			fprintf(stderr, "no process available\n");
+			return -1;
+		}
+		data = process_dump_sort_allocations;
 	}
-
-	if (argc == 1)
-		data = process_dump_sort_usage;
 	else {
 		data = NULL;
 		len = strlen(argv[1]);
@@ -767,8 +741,17 @@ static int do_dump(struct cmd_opt *cmd, int argc, const char *argv[])
 		}
 
 		if (!data) {
-			fprintf(stderr, "%s: unknown sort criteria\n", cmd->name);
-			return -1;
+			process = server_find_process(server, atoi(argv[1]));
+			if (!process) {
+				fprintf(stderr, "%s: unknown sort criteria\n", cmd->name);
+				return -1;
+			}
+			data = process_dump_sort_allocations;
+		}
+		else {
+			process = get_process(argv[2]);
+			if (!process)
+				return -1;
 		}
 	}
 
@@ -814,6 +797,12 @@ static int do_help(struct cmd_opt *cmd, int argc, const char *argv[])
 	return -1;
 }
 
+static int show_process_pid(mt_process *process)
+{
+	printf(" %d", process->pid);
+	return 0;
+}
+
 static int do_proclist(struct cmd_opt *cmd, int argc, const char *argv[])
 {
 	if (argc > 1) {
@@ -844,13 +833,11 @@ static int do_reset(struct cmd_opt *cmd, int argc, const char *argv[])
 {
 	mt_process *process;
 
-	process = server_first_process(server);
-	if (!process) {
-		fprintf(stderr, "no process available\n");
-		return 0;
-	}
+	process = get_process(argv[1]);
+	if (!process)
+		return -1;
 
-	process_reset(process);
+	process_reset_allocations(process);
 
 	return 0;
 }
@@ -866,11 +853,9 @@ static int do_scan(struct cmd_opt *cmd, int argc, const char *argv[])
 	if (!connected())
 		return -1;
 
-	process = server_first_process(server);
-	if (!process) {
-		fprintf(stderr, "no process available\n");
-		return 0;
-	}
+	process = get_process(argv[1]);
+	if (!process)
+		return -1;
 	
 	if (argc == 1)
 		mode = SCAN_ALL;
@@ -947,13 +932,11 @@ static int do_start(struct cmd_opt *cmd, int argc, const char *argv[])
 	if (!connected())
 		return -1;
 
-	process = server_first_process(server);
-	if (!process) {
-		fprintf(stderr, "no process available\n");
-		return 0;
-	}
+	process = get_process(argv[1]);
+	if (!process)
+		return -1;
 
-	process_reset(process);
+	process_reset_allocations(process);
 
 	MT_SEND_MSG(server, process, MT_START, 0, 0, NULL);
 
@@ -967,11 +950,9 @@ static int do_status(struct cmd_opt *cmd, int argc, const char *argv[])
 	if (!connected())
 		return -1;
 
-	process = server_first_process(server);
-	if (!process) {
-		fprintf(stderr, "no process available\n");
-		return 0;
-	}
+	process = get_process(argv[1]);
+	if (!process)
+		return -1;
 
 	process_status(process);
 
@@ -985,11 +966,9 @@ static int do_stop(struct cmd_opt *cmd, int argc, const char *argv[])
 	if (!connected())
 		return -1;
 
-	process = server_first_process(server);
-	if (!process) {
-		fprintf(stderr, "no process available\n");
-		return 0;
-	}
+	process = get_process(argv[1]);
+	if (!process)
+		return -1;
 
 	MT_SEND_MSG(server, process, MT_STOP, 0, 0, NULL);
 

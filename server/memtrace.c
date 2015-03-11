@@ -82,6 +82,7 @@ static void *(*old_aligned_alloc)(size_t alignment, size_t size);
 static void *(*old_valloc)(size_t size);
 static void *(*old_pvalloc)(size_t size);
 static void *(*old_mmap)(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+static void *(*old_mmap64)(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
 static int (*old_munmap)(void *addr, size_t length);
 
 static void _mt_printf(const char *format, ...);
@@ -295,7 +296,7 @@ static int mt_check(void)
 	return ret;
 }
 
-static void mt_call_with_backtrace(int to_skip, uint16_t operation, void *old_ptr, void *new_ptr, unsigned long size)
+static void mt_call_with_backtrace(int to_skip, uint16_t operation, void *ptr, unsigned long size)
 {
 	int count;
 	int old_errno = errno;
@@ -305,6 +306,9 @@ static void mt_call_with_backtrace(int to_skip, uint16_t operation, void *old_pt
 	void **frames;
 	mt_alloc_payload mt_alloc;
 
+	if (!ptr)
+		return;
+//fprintf(stderr, "%s:%d %u %p %lu\n", __FUNCTION__, __LINE__, operation, ptr, size);
 	in_report = 1;
 
 	count = backtrace(buf, shm->info.stack_depth + to_skip);
@@ -315,13 +319,41 @@ static void mt_call_with_backtrace(int to_skip, uint16_t operation, void *old_pt
 	if (n_frames < 0)
 		n_frames = 0;
 
-	mt_alloc.old_ptr = (typeof(mt_alloc.old_ptr))old_ptr;
-	mt_alloc.new_ptr = (typeof(mt_alloc.old_ptr))new_ptr;
+	mt_alloc.ptr = (typeof(mt_alloc.ptr))ptr;
 	mt_alloc.size = (typeof(mt_alloc.size))size;
 
 	ret = TEMP_FAILURE_RETRY(sem_wait(&shm->sem));
 	if (!ret) {
 		MT_SEND_MSG(operation, sizeof(mt_alloc), &mt_alloc, n_frames * sizeof(void *), frames);
+
+		sem_post(&shm->sem);
+	}
+
+	in_report = 0;
+
+	errno = old_errno;
+
+	return;
+}
+
+static void mt_call(uint16_t operation, void *ptr, unsigned long size)
+{
+	int old_errno = errno;
+	int ret;
+	mt_alloc_payload mt_alloc;
+
+	if (!ptr)
+		return;
+//fprintf(stderr, "%s:%d %u %p %lu\n", __FUNCTION__, __LINE__, operation, ptr, size);
+
+	in_report = 1;
+
+	mt_alloc.ptr = (typeof(mt_alloc.ptr))ptr;
+	mt_alloc.size = (typeof(mt_alloc.size))size;
+
+	ret = TEMP_FAILURE_RETRY(sem_wait(&shm->sem));
+	if (!ret) {
+		MT_SEND_MSG(operation, sizeof(mt_alloc), &mt_alloc, 0, NULL);
 
 		sem_post(&shm->sem);
 	}
@@ -454,6 +486,7 @@ static void mt_check_init(void)
 	old_valloc = dlsym(RTLD_NEXT, "valloc");
 	old_pvalloc = dlsym(RTLD_NEXT, "pvalloc");
 	old_mmap = dlsym(RTLD_NEXT, "mmap");
+	old_mmap64 = dlsym(RTLD_NEXT, "mmap64");
 	old_munmap = dlsym(RTLD_NEXT, "munmap");
 
 	mt_init(0);
@@ -480,7 +513,7 @@ static void *do_malloc(size_t size, int to_skip)
 	result = old_malloc(size);
 	if (result) {
 		if (in_trace == 1 && mt_check())
-			mt_call_with_backtrace(to_skip + 2, MT_ALLOC, 0, result, size);
+			mt_call_with_backtrace(to_skip + 2, MT_MALLOC, result, size);
 	}
 
 	--in_trace;
@@ -504,7 +537,7 @@ void *memalign(size_t alignment, size_t size)
 	result = old_memalign(alignment, size);
 	if (result) {
 		if (in_trace == 1 && mt_check())
-			mt_call_with_backtrace(2, MT_MEMALIGN, 0, result, size);
+			mt_call_with_backtrace(2, MT_MEMALIGN, result, size);
 	}
 
 	--in_trace;
@@ -529,7 +562,7 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
 	ret = old_posix_memalign(memptr, alignment, size);
 	if (!ret) {
 		if (in_trace == 1 && mt_check())
-			mt_call_with_backtrace(2, MT_POSIX_MEMALIGN, 0, *memptr, size);
+			mt_call_with_backtrace(2, MT_POSIX_MEMALIGN, *memptr, size);
 	}
 
 	--in_trace;
@@ -553,7 +586,7 @@ void *aligned_alloc(size_t alignment, size_t size)
 	result = old_aligned_alloc(alignment, size);
 	if (result) {
 		if (in_trace == 1 && mt_check())
-			mt_call_with_backtrace(2, MT_ALIGNED_ALLOC, 0, result, size);
+			mt_call_with_backtrace(2, MT_ALIGNED_ALLOC, result, size);
 	}
 
 	--in_trace;
@@ -577,7 +610,7 @@ void *valloc(size_t size)
 	result = old_valloc(size);
 	if (result) {
 		if (in_trace == 1 && mt_check())
-			mt_call_with_backtrace(2, MT_VALLOC, 0, result, size);
+			mt_call_with_backtrace(2, MT_VALLOC, result, size);
 	}
 
 	--in_trace;
@@ -601,7 +634,7 @@ void *pvalloc(size_t size)
 	result = old_pvalloc(size);
 	if (result) {
 		if (in_trace == 1 && mt_check())
-			mt_call_with_backtrace(2, MT_PVALLOC, 0, result, size);
+			mt_call_with_backtrace(2, MT_PVALLOC, result, size);
 	}
 
 	--in_trace;
@@ -624,8 +657,10 @@ void *realloc(void *ptr, size_t size)
 
 	result = old_realloc(ptr, size);
 	if (result) {
-		if (in_trace == 1 && mt_check())
-			mt_call_with_backtrace(2, MT_REALLOC, ptr, result, size);
+		if (in_trace == 1 && mt_check()) {
+			mt_call_with_backtrace(2, MT_FREE, ptr, 0);
+			mt_call_with_backtrace(2, MT_REALLOC, result, size);
+		}
 	}
 
 	--in_trace;
@@ -645,7 +680,7 @@ void free(void *ptr)
 	++in_trace;
 
 	if (in_trace == 1 && mt_check())
-		mt_call_with_backtrace(2, MT_FREE, ptr, 0, 0);
+		mt_call(MT_FREE, ptr, 0);
 
 	old_free(ptr);
 
@@ -684,7 +719,31 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 	result = old_mmap(addr, length, prot, flags, fd, offset);
 	if (result) {
 		if (in_trace == 1 && mt_check())
-			mt_call_with_backtrace(2, MT_MMAP, 0, result, length);
+			mt_call_with_backtrace(2, MT_MMAP, result, length);
+	}
+
+	--in_trace;
+
+	return result;
+}
+
+void *mmap64(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+	void *result;
+
+	if (!old_mmap) {
+		mt_check_init();
+
+		if (!old_mmap64)
+			return NULL;
+	}
+
+	++in_trace;
+
+	result = old_mmap64(addr, length, prot, flags, fd, offset);
+	if (result) {
+		if (in_trace == 1 && mt_check())
+			mt_call_with_backtrace(2, MT_MMAP64, result, length);
 	}
 
 	--in_trace;
@@ -708,7 +767,7 @@ int munmap(void *addr, size_t length)
 	++in_trace;
 
 	if (in_trace == 1 && mt_check())
-		mt_call_with_backtrace(2, MT_MUNMAP, addr, 0, length);
+		mt_call(MT_MUNMAP, addr, length);
 
 	ret = old_munmap(addr, length);
 

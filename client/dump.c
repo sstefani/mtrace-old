@@ -1,19 +1,21 @@
 /*
- * dump out strings to the terminal
+ * This file is part of mtrace.
+ * Copyright (C) 2015 Stefani Seibold <stefani@seibold.net>
  *
- * Copyright (C) 2014 Stefani Seibold <stefani@seibold.net>
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
  *
- * sponsored by Rohde & Schwarz GmbH & Co. KG
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 3 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
  */
 
 #include <errno.h> 
@@ -29,15 +31,11 @@
 #include "base.h"
 #include "dump.h"
 
-static int dump_prmt = 1;
-static int dump_last;
 static int dump_term;
 static FILE *dump_outfile;
 
 static int rows, cols;
 static int row, col;
-
-int idx;
 
 static int get_term_size(void)
 {
@@ -49,21 +47,16 @@ static int get_term_size(void)
 #endif
 	const char *s;
 
-	if (dump_prmt)
-		rows = -1;
-	else
-		rows = 0;
-
 #ifdef TIOCGSIZE
 	if (ioctl(0, TIOCGSIZE, &ttys) != -1) {
-		rows += ttys.ts_lines;
+		rows = ttys.ts_lines;
 		cols = ttys.ts_cols;
 		return 0;
 	}
 #endif
 #ifdef TIOCGWINSZ
 	if (ioctl(0, TIOCGWINSZ, &wins) != -1) {
-		rows += wins.ws_row;
+		rows = wins.ws_row;
 		cols = wins.ws_col;
 		return 0;
 	}
@@ -71,9 +64,9 @@ static int get_term_size(void)
 	if (rows) {
 		s = getenv("LINES");
 		if (s)
-			rows += strtol(s, NULL, 10);
+			rows = strtol(s, NULL, 10);
 		else
-			rows += 25;
+			rows = 25;
 	}
 
 	if (cols) {
@@ -88,35 +81,16 @@ static int get_term_size(void)
 	return 0;
 }
 
-int dump_prompt(int prompt)
+int dump_init(FILE *file)
 {
-	if (prompt != -1)
-		dump_prmt = prompt;
-	return dump_prmt;
-}
+	dump_outfile = file;
 
-int dump_open(const char *outfile)
-{
-	dump_last = 0;
-	dump_term = 0;
-	dump_outfile = NULL;
-
-	if (outfile) {
-		dump_outfile = fopen(outfile, "w");
-
-		if (!dump_outfile) {
-			fprintf(stderr, "cannot open output file: %s (%s)\n", outfile, strerror(errno));
-			dump_term = 1;
-			return -1;
-		}
-
-		return 0;
+	if (!dump_outfile) {
+		dump_term = 0;
+		row = 0;
+		col = 0;
+		get_term_size();
 	}
-
-	get_term_size();
-
-	row = 0;
-	col = 0;
 
 	return 0;
 }
@@ -126,17 +100,11 @@ static int dump_pager(void)
 	struct termios termios;
 	struct termios termios_old;
 	int c;
+	int len;
 	int ret;
 	short events;
 	
-	if (dump_last)
-		return 0;
-
-	dump_last = 1;
-
-	if (dump_prmt)
-		printf("Press <space> for next line, q for quit and any other for next page\r");
-
+	len = printf("Press <space> for next line, q for quit and any other for next page\r") - 1;
 	fflush(stdout);
 
 	tcgetattr(0, &termios_old);
@@ -151,16 +119,16 @@ static int dump_pager(void)
 	}
 	c = getchar();
 	io_set_events(0, events);
-	tcsetattr(0, TCSADRAIN, &termios_old);
+	tcsetattr(0, TCSANOW, &termios_old);
 
-	if (dump_prmt) {
-		printf("                                                                              \r");
-		fflush(stdout);
-	}
+	printf("%*s\r", len, "");
+	fflush(stdout);
 
 	switch(c) {
 	case '\03':
 	case 'q':
+		if (col)
+			fputc('\n', stdout);
 		dump_term = 1;
 		return -1;
 	case ' ':
@@ -192,7 +160,8 @@ static int next_nl(char *str, int l)
 
 static int dump_line(char *s, int n)
 {
-	dump_last = 0;
+	if (dump_term)
+		return -1;
 
 	col += fwrite(s, sizeof(char), n, stdout);
 
@@ -222,9 +191,14 @@ int dump_printf(const char *fmt, ...)
 	char *s;
 	int n;
 	va_list args;
+	int ret = 0;
 
-	if (dump_term)
-		return -1;
+	if (dump_outfile) {
+		va_start(args, fmt);
+		vfprintf(dump_outfile, fmt, args);
+		va_end(args);
+		return 0;
+	}
 
 	va_start(args, fmt);
 	n = vasprintf(&str, fmt, args);
@@ -233,48 +207,31 @@ int dump_printf(const char *fmt, ...)
 	if (n == -1)
 		return -1;
 
-	if (dump_outfile)
-		fputs(str, dump_outfile);
-	else {
-		s = str;
+	for(s = str; *s; ) {
+		n = next_nl(s, cols - col);
 
-		while(*s) {
-			n = next_nl(s, cols - col);
+		ret = dump_line(s, n);
+		if (ret)
+			break;
 
-			if (dump_line(s, n))
-				return -1;
+		s += n;
 
-			s += n;
-
-			if (*s == '\n') {
-				++s;
-				++n;
-			}
+		if (*s == '\n') {
+			++s;
+			++n;
 		}
 	}
 
 	free(str);
+	return ret;
+}
+
+int dump_flush(void)
+{
+	if (dump_outfile)
+		fflush(dump_outfile);
+	else
+		fflush(stdout);
 	return 0;
 }
 
-int dump_close(void)
-{
-	if (dump_outfile) {
-		fclose(dump_outfile);
-
-		dump_outfile = NULL;
-		dump_term = 1;
-
-		return 0;
-	}
-
-	if (!dump_term) {
-		if (col) {
-			row++;
-			col = 0;
-
-			fputc('\n', stdout);
-		}
-	}
-	return fflush(stdout);
-}

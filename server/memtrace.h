@@ -45,7 +45,7 @@ typedef struct _mt_msg mt_msg;
 
 typedef enum {
 	MT_NONE,
-	MT_ALLOC,
+	MT_MALLOC,
 	MT_REALLOC,
 	MT_FREE,
 	MT_EXEC,
@@ -65,6 +65,7 @@ typedef enum {
 	MT_PVALLOC,
 	MT_INFO,
 	MT_MMAP,
+	MT_MMAP64,
 	MT_MUNMAP,
 } mt_operation;
 
@@ -78,15 +79,13 @@ struct _mt_msg {
 };
 
 struct _mt_alloc_payload_64 {
-	uint64_t old_ptr;
-	uint64_t new_ptr;
+	uint64_t ptr;
 	uint64_t size;
 	uint64_t data[0];
 };
 
 struct _mt_alloc_payload_32 {
-	uint32_t old_ptr;
-	uint32_t new_ptr;
+	uint32_t ptr;
 	uint32_t size;
 	uint32_t data[0];
 };

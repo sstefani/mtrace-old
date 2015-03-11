@@ -201,28 +201,35 @@ static int socket_func(void *data, short revent)
 
 		server_add_process(server, process);
 
-		if (!test_64bit_support(is_64bit))
-			fprintf(stderr, "64 bit processes with pid %d not supported on 32 bit hosts\n", mt_msg.pid);
+	}
+	else {
+		if (process->swap_endian != swap_endian)
+			process = NULL;
+		else
+		if (process->status == MT_PROCESS_IGNORE)
+			process = NULL;
 	}
 
-	if (
-		(process->swap_endian == swap_endian) &&
-		(process->is_64bit == is_64bit)
-	) {
+	if (process) {
 		switch(mt_msg.operation) {
 		case MT_NONE:
 			break;
-		case MT_ALLOC:
+		case MT_MALLOC:
 		case MT_REALLOC:
-		case MT_FREE:
 		case MT_MEMALIGN:
 		case MT_POSIX_MEMALIGN:
 		case MT_ALIGNED_ALLOC:
 		case MT_VALLOC:
 		case MT_PVALLOC:
 		case MT_MMAP:
+		case MT_MMAP64:
+			process_alloc(process, &mt_msg, payload);
+			break;
+		case MT_FREE:
+			process_free(process, &mt_msg, payload);
+			break;
 		case MT_MUNMAP:
-			process_alloc(server, process, &mt_msg, payload);
+			process_munmap(process, &mt_msg, payload);
 			break;
 		case MT_FORK:
 			process_duplicate(process, server_find_process(server, pid_payload(process, payload)));
@@ -231,10 +238,9 @@ static int socket_func(void *data, short revent)
 			process_reinit(process, swap_endian, is_64bit);
 			break;
 		case MT_CLONE:
-//			process_set_clone(process, server_find_process(server, pid_payload(process, payload)));
 			break;
 		case MT_EXIT:
-			process_set_status(process, MT_PROCESS_EXITING);
+			process_exit(process);
 			break;
 		case MT_SCAN:
 			process_scan(process, payload, mt_msg.payload_len);
@@ -303,7 +309,7 @@ static int server_release_process(struct rb_node *node, void *user)
 {
 	struct rb_process *data = (struct rb_process *)node;
 
-	process_finalize(data->process);
+	process_delete(data->process);
 	free(data);
 	return 0;
 }
@@ -360,5 +366,4 @@ void server_remove_process(mt_server *server, mt_process *process)
 	if (process)
 		free(process);
 }
-
 

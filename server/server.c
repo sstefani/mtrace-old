@@ -212,17 +212,18 @@ static void thread_stop(pid_t pid, pid_t tid)
 
 static void thread_cont(pid_t pid, pid_t tid)
 {
-	int ret;
-		
 	if (ptrace(PTRACE_CONT, tid, 0, 0) == -1) {
 		if (errno != ESRCH)
 			fatal("PTRACE_CONT (%s)", strerror(errno));
-
+#if 0
+		int ret;
+		
 		ret = tgkill(pid, tid, SIGCONT);
 		if (ret == -1) {
 			if (ret != ESRCH)
 				fatal("tkill (%s)", strerror(errno));
 		}
+#endif
 	}
 }
 

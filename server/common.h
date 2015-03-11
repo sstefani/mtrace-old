@@ -63,7 +63,7 @@
 	(type *)( (char *)__mptr - offsetof(type,member) );})
 
 
-#define	MEMTRACE_SI_VERSION	2
+#define	MEMTRACE_SI_VERSION	3
 
 #define	MEMTRACE_SI_FORK	1
 #define	MEMTRACE_SI_EXEC	2

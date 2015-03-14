@@ -9,7 +9,7 @@ INSTALL_BASE	?= /usr
 LIB_NAME	= libmemtrace.so
 LIB_CFLAGS	= -Wall -O2 -D_GNU_SOURCE -g -fpic -fno-strict-aliasing
 LIB_LDFLAGS	= -g -shared
-LIB_LIBS	= -ldl -lrt
+LIB_LIBS	= -ldl -lrt -lunwind
 
 SERVER_NAME	= memtrace-server
 SERVER_CFLAGS	= -Wall -O2 -D_GNU_SOURCE -g -fno-strict-aliasing

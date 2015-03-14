@@ -947,9 +947,6 @@ static int do_status(struct cmd_opt *cmd, int argc, const char *argv[])
 {
 	mt_process *process;
 
-	if (!connected())
-		return -1;
-
 	process = get_process(argv[1]);
 	if (!process)
 		return -1;

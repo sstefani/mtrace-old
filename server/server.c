@@ -78,9 +78,7 @@ static pthread_t	thread;
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static volatile int handle_cmd;
-
-static sigset_t block_sigset;
+static volatile int wakeup_pid;
 
 static int tgkill(int tgid, int tid, int sig)
 {
@@ -196,18 +194,46 @@ static void create_comm(void)
 		fatal("listen (%s)", strerror(errno));
 }
 
+static int thread_signal(pid_t pid, pid_t tid, int sig)
+{
+	int status;
+	int ret;
+	
+	ret = tgkill(pid, tid, sig);
+	if (ret == -1)
+		return -1;
+
+	for(;;) {
+		int stop_sig = 0;
+
+		if (TEMP_FAILURE_RETRY(waitpid(tid, &status, __WALL)) == -1)
+			return -1;
+
+		if (WIFEXITED(status))
+			return -1;
+
+		if (WIFSTOPPED(status)) {
+			stop_sig = WSTOPSIG(status);
+
+			if (stop_sig == sig)
+				break;
+
+			if (stop_sig == SIGTRAP)
+				stop_sig = 0;
+			else
+			if (stop_sig == SIGSTOP)
+				stop_sig = 0;
+		}
+
+		if (ptrace(PTRACE_CONT, tid, 0, stop_sig) == -1)
+			return -1;
+	}
+	return 0;
+}
+
 static void thread_stop(pid_t pid, pid_t tid)
 {
-	int ret;
-	int status;
-
-	ret = tgkill(pid, tid, SIGSTOP);
-	if (ret == -1) {
-		if (ret != ESRCH)
-			fatal("tkill (%s)", strerror(errno));
-	}
-	else
-		waitpid(tid, &status, __WALL);
+	thread_signal(pid, tid, SIGSTOP);
 }
 
 static void thread_cont(pid_t pid, pid_t tid)
@@ -215,15 +241,6 @@ static void thread_cont(pid_t pid, pid_t tid)
 	if (ptrace(PTRACE_CONT, tid, 0, 0) == -1) {
 		if (errno != ESRCH)
 			fatal("PTRACE_CONT (%s)", strerror(errno));
-#if 0
-		int ret;
-		
-		ret = tgkill(pid, tid, SIGCONT);
-		if (ret == -1) {
-			if (ret != ESRCH)
-				fatal("tkill (%s)", strerror(errno));
-		}
-#endif
 	}
 }
 
@@ -419,20 +436,13 @@ static void proc_cont(uint32_t pid)
 
 static void proc_stop(uint32_t pid)
 {
-	int status;
 	int ret;
 
 	ret = TEMP_FAILURE_RETRY(sem_wait(&shm->sem));
 	if (!ret) {
-		ret = kill(pid, SIGTRAP);
-		if (ret == -1) {
-			if (ret != ESRCH)
-				fatal("kill SIGTRAP (%s)", strerror(errno));
-		}
-		else {
-			if (waitpid(pid, &status, __WALL) == pid)
-				for_each_thread(pid, thread_stop);
-		}
+		if (thread_signal(pid, pid, SIGSTOP) != -1)
+			for_each_thread(pid, thread_stop);
+
 		sem_post(&shm->sem);
 	}
 }
@@ -585,7 +595,6 @@ static void handle_requests(void)
 {
 	int			ret;
 	struct pollfd		pfd[2];
-	int			pid;
 
 	pfd[0].fd = server_fd;
 	pfd[0].events = POLLIN|POLLPRI;
@@ -600,17 +609,17 @@ static void handle_requests(void)
 			break;
 
 		if (pfd[0].revents & (POLLIN|POLLPRI)) {
-			pthread_mutex_lock(&mutex);
+			int pid;
 
-			handle_cmd = 1;
+			pthread_mutex_lock(&mutex);
 
 			pid = vfork();
 			if (pid == 0)
-				kill(getpid(), SIGTERM);
+				_exit(0);
+			wakeup_pid = pid;
 
-			do {
+			while(wakeup_pid != -1)
 				pthread_cond_wait(&cond, &mutex);
-			} while(handle_cmd);
 
 			pthread_mutex_unlock(&mutex);
 
@@ -737,11 +746,8 @@ static void server_run(void)
 {
 	int pid = main_pid;
 	int status;
-	static sigset_t empty_sigset;
 
-	sigemptyset(&empty_sigset);
-
-	if (waitpid(pid, &status, 0) == -1)
+	if (TEMP_FAILURE_RETRY(waitpid(pid, &status, 0)) == -1)
 		fatal("waitpid");
 
 	if (WIFEXITED(status))
@@ -754,11 +760,11 @@ static void server_run(void)
 		fatal("ptrace CONT (%s)", strerror(errno));
 
 	for (;;) {
-		pid = waitpid(-1, &status, __WALL | WNOHANG);
-		if (!pid) {
-			sigsuspend(&empty_sigset);
+		int stop_sig = 0;
+
+		pid = TEMP_FAILURE_RETRY(waitpid(-1, &status, __WALL));
+		if (!pid)
 			continue;
-		}
 
 		if (pid == -1) {
 			if (errno == ECHILD)
@@ -767,9 +773,9 @@ static void server_run(void)
 		}
 
 		pthread_mutex_lock(&mutex);
-		if (handle_cmd) {
+		if (pid == wakeup_pid) {
 			handle_command();
-			handle_cmd = 0;
+			wakeup_pid = -1;
 			pthread_cond_broadcast(&cond);
 		}
 		pthread_mutex_unlock(&mutex);
@@ -778,38 +784,18 @@ static void server_run(void)
 			continue;
 
 		if (WIFSTOPPED(status)) {
-			int sig = WSTOPSIG(status);
+			stop_sig = WSTOPSIG(status);
 
-			if (sig == SIGTRAP) {
-				int event = (status >> 16) & 0xffff;
-
-				sig = 0;
-
-				if (event) {
-					pid_t newpid = 0;
-
-					if (ptrace(PTRACE_GETEVENTMSG, pid, NULL, &newpid) == -1)
-						fatal("ptrace GETEVENTMSG (%s)", strerror(errno));
-
-					if (newpid) {
-						if (event == PTRACE_EVENT_FORK)
-							; // printf("fork caught\n");
-
-						if (ptrace(PTRACE_CONT, newpid, 0, 0) == -1) {
-							if (errno != ESRCH)
-								fatal("ptrace CONT (%s)", strerror(errno));
-						}
-					}
-				}
-			}
+			if (stop_sig == SIGTRAP)
+				stop_sig = 0;
 			else
-			if (sig == SIGSTOP)
-				sig = 0;
+			if (stop_sig == SIGSTOP)
+				stop_sig = 0;
+		}
 
-			if (ptrace(PTRACE_CONT, pid, 0, sig) == -1) {
-				if (errno != ESRCH)
-					fatal("ptrace CONT (%s)", strerror(errno));
-			}
+		if (ptrace(PTRACE_CONT, pid, 0, stop_sig) == -1) {
+			if (errno != ESRCH)
+				fatal("ptrace CONT (%s)", strerror(errno));
 		}
 	}
 
@@ -976,7 +962,6 @@ static void parse_options(int *argc, char ***argv)
 int main(int argc, char **argv)
 {
 	struct sigaction actions;
-	int ret;
 
 	parse_options(&argc, &argv);
 
@@ -986,13 +971,6 @@ int main(int argc, char **argv)
 	create_shmem();
 
 	main_pid = app_start((char **)(argv + 1));
-
-	sigemptyset(&block_sigset);
-	sigaddset(&block_sigset, SIGCHLD);
-
-	ret = pthread_sigmask(SIG_BLOCK, &block_sigset, NULL);
-	if (ret) 
-		fatal("pthread_sigmask (%s)", strerror(ret));
 
 	atexit(cleanup);
 

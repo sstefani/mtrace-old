@@ -3,7 +3,7 @@
 
 MAKEFILE	= Makefile
 SHELL		= /bin/sh
-LIBS		= -ldl -lrt -lz -lreadline -lbfd
+LIBS		= -ldl -lrt -lz -lreadline -lbfd #-ltermcap
 
 PROGNAME	?= memtrace
 INSTALLBASE	?= /usr

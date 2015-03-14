@@ -1094,12 +1094,10 @@ void process_free(mt_process *process, mt_msg *mt_msg, void *payload)
 	block = process_rb_search(&process->block_table, ptr);
 	if (block) {
 		if (is_mmap(block->stack_node->stack->operation))
-			fprintf(stderr, ">>> block missmatch MAP<>MALLOC %#lx found\n", ptr);
+			fprintf(stderr, ">>> block missmatch MALLOC<>MAP %#lx found\n", ptr);
 
 		process_rb_delete_block(process, block);
 	}
-	else
-		fprintf(stderr, ">>> block %#lx not found (pid=%d, tid=%d)\n", ptr, process->pid, mt_msg->tid);
 }
 
 void process_alloc(mt_process *process, mt_msg *mt_msg, void *payload)
@@ -1107,7 +1105,7 @@ void process_alloc(mt_process *process, mt_msg *mt_msg, void *payload)
 	struct rb_block *block = NULL;
 	uint32_t payload_len = mt_msg->payload_len;
 	unsigned long *stack_data;
-	uint32_t stack_size;
+	unsigned long stack_size;
 	unsigned long ptr;
 	unsigned long size;
 

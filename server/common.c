@@ -143,6 +143,7 @@ int mt_send_msg(int fd, mt_operation op, uint32_t pid, uint32_t tid, size_t payl
 	struct msghdr	msghdr;
 	va_list va;
 	int ret;
+	int len = 0;
 
 	if (fd == -1)
 		return 0;
@@ -157,6 +158,7 @@ int mt_send_msg(int fd, mt_operation op, uint32_t pid, uint32_t tid, size_t payl
 
 	io[0].iov_base = &mt_msg;
 	io[0].iov_len = sizeof(mt_msg);
+	len += io[0].iov_len;
 
 	if (payload) {
 		size_t payload2_len;
@@ -164,6 +166,7 @@ int mt_send_msg(int fd, mt_operation op, uint32_t pid, uint32_t tid, size_t payl
 
 		io[1].iov_base = payload;
 		io[1].iov_len = payload_len;
+		len += io[1].iov_len;
 
 		msghdr.msg_iovlen++;
 
@@ -177,6 +180,7 @@ int mt_send_msg(int fd, mt_operation op, uint32_t pid, uint32_t tid, size_t payl
 
 			io[2].iov_base = payload2;
 			io[2].iov_len = payload2_len;
+			len += io[2].iov_len;
 			
 			msghdr.msg_iovlen++;
 		}
@@ -197,7 +201,7 @@ int mt_send_msg(int fd, mt_operation op, uint32_t pid, uint32_t tid, size_t payl
 
 	ret = TEMP_FAILURE_RETRY(sendmsg(fd, &msghdr, MSG_NOSIGNAL));
 	
-	if (ret != sizeof(mt_msg) + payload_len) {
+	if (ret != len) {
 		close(fd);
 		return -1;
 	}

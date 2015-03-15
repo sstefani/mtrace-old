@@ -73,7 +73,6 @@ static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static int no_trace;
 static struct memtrace_shm *shm;
 
-static int (*old_system)(const char *line);
 static int (*old_execve)(const char *filename, char *const argv[], char *const envp[]);
 static int (*old_fork)(void);
 static int (*old_clone)(int (*fn) (void *arg), void *child_stack, int flags, void *arg, void *xarg1, void *xarg2, void *xarg3, void *xarg4);
@@ -429,7 +428,6 @@ static void mt_init(pid_t ppid)
 	int old_errno = errno;
 	int shm_fd = -1;
 
-	no_trace = 0;
 	shm = NULL;
 
 	reset_info();
@@ -505,7 +503,6 @@ static void mt_check_init(void)
 
 	initialized = -1;
 
-	old_system = dlsym(RTLD_NEXT, "system");
 	old_execve = dlsym(RTLD_NEXT, "execve");
 	old_fork = dlsym(RTLD_NEXT, "fork");
 	old_clone = dlsym(RTLD_NEXT, "__clone");
@@ -814,6 +811,39 @@ int munmap(void *addr, size_t length)
 }
 #endif
 
+static void unset_memtrace(char *const envp[])
+{
+	const char ld_preload_env[] = "LD_PRELOAD=";
+	const char libname[] = "libmemtrace.so";
+	char *const *p = envp;
+
+	no_trace = 1;
+
+	while(*p) {
+		if (strncmp(*p, ld_preload_env, sizeof(ld_preload_env)-1) == 0)
+			break;
+		p++;
+	}
+
+	if (*p) {
+		char *s = *p + sizeof(ld_preload_env)-1;
+		char *r = strstr(s, libname);
+
+		if (r) {
+			if (r[sizeof(libname)-1] != ':' && r[sizeof(libname)-1] != '\0')
+				return;
+
+			memset(r, ':', sizeof(libname)-1);
+
+			while(s != r--) {
+				if (*r == ':')
+					break;
+				*r = ':';
+			}
+		}
+	}
+}
+
 int fork(void)
 {
 	int pid;
@@ -830,37 +860,16 @@ int fork(void)
 		if (shm->info.mode & MEMTRACE_SI_FORK)
 			new_process(old_pid, getpid(), MT_FORK);
 		else
-			no_trace = 1;
+			unset_memtrace(__environ);
 	}
 
 	return pid;
 }
 
-int system(const char *line)
-{
-	if (!no_trace) {
-		if (!(shm->info.mode & MEMTRACE_SI_EXEC))
-			unsetenv("LD_PRELOAD");
-	}
-
-	return old_system(line);
-}
-
 int execve(const char *filename, char *const argv[], char *const envp[])
 {
-	const char ld_preload_env[] = "LD_PRELOAD=";
-
-	if (!(shm->info.mode & MEMTRACE_SI_EXEC)) {
-		int i;
-
-		for (i = 0; envp[i]; i++) {
-			if (strncmp(envp[i], ld_preload_env, sizeof(ld_preload_env)-1) == 0) { 
-				envp[i][0] = 'M';
-				envp[i][1] = 'T';
-				break;
-			}
-		}
-	}
+	if (!(shm->info.mode & MEMTRACE_SI_EXEC))
+		unset_memtrace(envp);
 
 	return old_execve(filename, argv, envp);
 }
@@ -885,7 +894,7 @@ static int clone_helper(void *arg)
 	else
 		reset_info();
 
-	if (data.flags & CLONE_VM) 
+	if (data.flags & CLONE_VM)
 		new_process(data.info_ptr->pid, (data.flags & CLONE_THREAD) ? data.info_ptr->pid : getpid(), MT_CLONE);
 	else {
 		if (shm->info.mode & MEMTRACE_SI_FORK)

@@ -422,6 +422,37 @@ static void new_process(pid_t old_pid, pid_t curr_pid, mt_operation operation)
 	errno = old_errno;
 }
 
+static void unset_memtrace(char *const envp[])
+{
+	const char ld_preload_env[] = "LD_PRELOAD=";
+	const char libname[] = "libmemtrace.so";
+	char *const *p = envp;
+
+	while(*p) {
+		if (strncmp(*p, ld_preload_env, sizeof(ld_preload_env)-1) == 0)
+			break;
+		p++;
+	}
+
+	if (*p) {
+		char *s = *p + sizeof(ld_preload_env)-1;
+		char *r = strstr(s, libname);
+
+		if (r) {
+			if (r[sizeof(libname)-1] != ':' && r[sizeof(libname)-1] != '\0')
+				return;
+
+			memset(r, ':', sizeof(libname)-1);
+
+			while(s != r--) {
+				if (*r == ':')
+					break;
+				*r = ':';
+			}
+		}
+	}
+}
+
 static void mt_init(pid_t ppid)
 {
 	char *env;
@@ -450,6 +481,9 @@ static void mt_init(pid_t ppid)
 	if (shm->info.version != MEMTRACE_SI_VERSION)
 		goto fail;
 
+	if (!(shm->info.mode & MEMTRACE_SI_FORK))
+		unset_memtrace(__environ);
+
 	new_process(ppid, getpid(), MT_NEW);
 
 	errno = old_errno;
@@ -462,6 +496,8 @@ fail:
 
 		shm = MAP_FAILED;
 	}
+
+	unset_memtrace(__environ);
 
 	no_trace = 1;
 
@@ -811,39 +847,6 @@ int munmap(void *addr, size_t length)
 }
 #endif
 
-static void unset_memtrace(char *const envp[])
-{
-	const char ld_preload_env[] = "LD_PRELOAD=";
-	const char libname[] = "libmemtrace.so";
-	char *const *p = envp;
-
-	no_trace = 1;
-
-	while(*p) {
-		if (strncmp(*p, ld_preload_env, sizeof(ld_preload_env)-1) == 0)
-			break;
-		p++;
-	}
-
-	if (*p) {
-		char *s = *p + sizeof(ld_preload_env)-1;
-		char *r = strstr(s, libname);
-
-		if (r) {
-			if (r[sizeof(libname)-1] != ':' && r[sizeof(libname)-1] != '\0')
-				return;
-
-			memset(r, ':', sizeof(libname)-1);
-
-			while(s != r--) {
-				if (*r == ':')
-					break;
-				*r = ':';
-			}
-		}
-	}
-}
-
 int fork(void)
 {
 	int pid;
@@ -859,8 +862,11 @@ int fork(void)
 	if (!pid) {	/* New child process */
 		if (shm->info.mode & MEMTRACE_SI_FORK)
 			new_process(old_pid, getpid(), MT_FORK);
-		else
+		else {
+			no_trace = 1;
+
 			unset_memtrace(__environ);
+		}
 	}
 
 	return pid;

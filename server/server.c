@@ -54,6 +54,15 @@
 
 #define	MIN_STACK	4
 
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 4096
+#endif
+
+struct map {
+	unsigned long long start;
+	unsigned long long end;
+};
+
 static struct memtrace_shm *shm = MAP_FAILED;
 
 static int follow_fork;
@@ -225,8 +234,10 @@ static int thread_signal(pid_t pid, pid_t tid, int sig)
 				stop_sig = 0;
 		}
 
-		if (ptrace(PTRACE_CONT, tid, 0, stop_sig) == -1)
+		if (ptrace(PTRACE_CONT, tid, 0, stop_sig) == -1) {
+			fprintf(stderr, "%s:%d ptrace CONT (%s)\n", __FUNCTION__, __LINE__, strerror(errno));
 			return -1;
+		}
 	}
 	return 0;
 }
@@ -240,7 +251,7 @@ static void thread_cont(pid_t pid, pid_t tid)
 {
 	if (ptrace(PTRACE_CONT, tid, 0, 0) == -1) {
 		if (errno != ESRCH)
-			fatal("PTRACE_CONT (%s)", strerror(errno));
+			fatal("%s:%d ptrace CONT (%s)\n", __FUNCTION__, __LINE__, strerror(errno));
 	}
 }
 
@@ -340,7 +351,7 @@ static unsigned long get_val64(void *data, unsigned long index)
 	return (unsigned long)*(uint64_t *)(data + index * sizeof(uint64_t));
 }
 
-static int open_pid(pid_t pid)
+static int open_mem(pid_t pid)
 {
 	int h;
 	char *proc_name;
@@ -349,7 +360,7 @@ static int open_pid(pid_t pid)
 		fatal("asprintf (%s)", strerror(errno));
 
 	h = open(proc_name, O_RDONLY);
-	if (h  == -1)
+	if (h == -1)
 		fatal("open: '%s'(%s)", proc_name, strerror(errno));
 
 	free(proc_name);
@@ -357,54 +368,133 @@ static int open_pid(pid_t pid)
 	return h;
 }
 
-void *mem_scan(mt_msg *cmd, void *payload, unsigned long *data_len)
+static struct map *get_writeable_mappings(pid_t pid)
+{
+	unsigned long long start;
+	unsigned long long end;
+	char permr;
+	char permw;
+	char filename[PATH_MAX + 2];
+	char nl;
+	FILE *in;
+	unsigned int maps_size = 0;
+	struct map *maps = NULL;
+	unsigned int map = 0;
+
+	maps_size = 16;
+	maps = malloc(maps_size * sizeof(*maps));
+
+	snprintf(filename, sizeof(filename)-1, "/proc/%d/maps", pid);
+
+	in = fopen(filename, "r");
+	if (!in)
+		goto skip;
+
+	while(fscanf(in, "%llx-%llx %c%c%*c%*c %*x %*x:%*x %*u%*64[ ]%c", &start, &end, &permr, &permw, filename) == 5) {
+		if (*filename != '\n') {
+			if (fscanf(in, "%" STR(PATH_MAX) "[^\n]%c", filename + 1, &nl) != 2)
+				break;
+			if (nl != '\n')
+				break;
+		}
+		else
+			*filename = 0;
+
+		if (*filename != '[' && *filename != 0) {
+			struct stat statbuf;
+
+			if (stat(filename, &statbuf) < 0)
+				continue;
+
+			if (S_ISCHR(statbuf.st_mode)) {
+				if (statbuf.st_rdev != makedev(1, 5))
+					continue;
+			}
+		}
+
+		if (permr != 'r' || permw != 'w')
+			continue;
+
+		if (map >= maps_size - 1) {
+			maps_size += 16;
+			maps = realloc(maps, maps_size * sizeof(*maps));
+		}
+
+		maps[map].start = start;
+		maps[map].end = end;
+
+		map++;
+	}
+
+	fclose(in);
+skip:
+	maps[map].start = 0;
+	maps[map].end = 0;
+
+	return maps;
+}
+
+static void *mem_scan(mt_msg *cmd, void *payload, unsigned long *data_len)
 {
 	mt_scan_payload *mt_scan = payload;
 	unsigned long mask = (unsigned long)mt_scan->mask;
 	uint32_t ptr_size = mt_scan->ptr_size;
-	void *maps = mt_scan->data;
-	void *blocks = maps + 2 * mt_scan->maps * ptr_size;
+	void *blocks = mt_scan->data;
 	unsigned long n = (cmd->payload_len - (blocks - payload)) / ptr_size;
-	unsigned long start, end, addr, i, m, found;
-	int h, do_peek;
+	unsigned long map;
+	struct map *maps;
+	int h;
 	unsigned long (*get_val)(void *data, unsigned long index);
+	unsigned long start;
+	unsigned long end;
+
+	if (!n)
+		return NULL;
 
 	if (ptr_size == sizeof(uint32_t))
 		get_val = get_val32;
 	else
 		get_val = get_val64;
 
-	h = open_pid(cmd->pid);
+	h = open_mem(cmd->pid);
+	if (h == -1)
+		return NULL;
 
-	for(m = 0; m < mt_scan->maps; ++m) {
-		char page_buf[4096];
+	maps = get_writeable_mappings(cmd->pid);
 
-		start = get_val(maps, m * 2);
-		end = start + get_val(maps, m * 2 + 1);
+	for(map = 0; (start = maps[map].start) && (end = maps[map].end); ++map) {
+		int do_peek = 0;
 
-		if (lseek(h, start, SEEK_SET) != start)
-			fatal("lseek (%s)", strerror(errno));
-		
-		for(do_peek = 0; start < end; start += sizeof(page_buf)) {
+		while(start < end) {
+			unsigned long i;
+			char page_buf[PAGE_SIZE];
+
 			if (!do_peek) {
-				if (read(h, page_buf, sizeof(page_buf)) == -1)
+				if (lseek(h, start, SEEK_SET) != (off_t)start || read(h, page_buf, sizeof(page_buf)) == -1)
 					do_peek = 1;
 			}
 
 			if (do_peek) {
-				for(i = 0; i < sizeof(page_buf); i += sizeof(long)) {
-					*(long *)&page_buf[i] = ptrace(PTRACE_PEEKDATA, cmd->pid, start + i, 0);
+				errno = 0;
 
-					if (errno) {
-						fprintf(stderr, "ptrace (%s)\n", strerror(errno));
+				for(i = 0; i < sizeof(page_buf); i += sizeof(long)) {
+					long val;
+
+					val = ptrace(PTRACE_PEEKDATA, cmd->pid, start + i, 0);
+					if (val == -1 && errno) {
+						fprintf(stderr, "%s:%d ptrace PEEKDATA (%s)\n", __FUNCTION__, __LINE__, strerror(errno));
 						break;
 					}
+
+					*(long *)&page_buf[i] = val;
 				}
-				if (i != sizeof(page_buf))
+				if (i < sizeof(page_buf))
 					break;
 			}
 
 			for(i = 0; i < sizeof(page_buf) / ptr_size; ++i) {
+				unsigned long found, addr;
+
 				addr = get_val(page_buf, i);
 
 				if (addr & mask)
@@ -412,16 +502,24 @@ void *mem_scan(mt_msg *cmd, void *payload, unsigned long *data_len)
 
 				found = find_block(get_val, blocks, n, addr);
 				if (found != n) {
-					if (found != --n)
+					if (!--n)
+						goto finish;
+
+					if (found != n)
 						memmove(blocks + found * ptr_size, blocks + (found + 1) * ptr_size, (n - found) * ptr_size);
 				}
 			}
+
+			start += sizeof(page_buf);
 		}
 	}
 
+finish:
 	close(h);
 
 	*data_len = n * ptr_size;
+
+	free(maps);
 
 	return blocks;
 }
@@ -429,7 +527,7 @@ void *mem_scan(mt_msg *cmd, void *payload, unsigned long *data_len)
 static void proc_cont(uint32_t pid)
 {
 	if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
-		fatal("ptrace CONT (%s)", strerror(errno));
+		fatal("%s:%d ptrace (%s)", __FUNCTION__, __LINE__, strerror(errno));
 
 	for_each_thread(pid, thread_cont);
 }
@@ -447,7 +545,7 @@ static void proc_stop(uint32_t pid)
 	}
 }
 
-static void *get_map(uint32_t pid, unsigned int *size)
+static void *get_executable_mappings(pid_t pid, unsigned int *size)
 {
 	unsigned long long start;
 	unsigned long long end;
@@ -461,7 +559,6 @@ static void *get_map(uint32_t pid, unsigned int *size)
 	struct xmap *xmap = NULL;
 	void *xmap_base = NULL;
 	unsigned int xmap_size = 0;
-	unsigned char perm;
 
 	proc_stop(pid);
 
@@ -500,8 +597,7 @@ static void *get_map(uint32_t pid, unsigned int *size)
 		else
 			flen = 0;
 
-		perm = ((permr == 'r') ? PERM_R : 0) | ((permw == 'w') ? PERM_W : 0) | ((permx == 'x') ? PERM_X : 0);
-		if (!(perm & PERM_R) || !(perm & (PERM_W | PERM_X)))
+		if (permx != 'x' || permr != 'r' || permw == 'w')
 			continue;
 
 		xmap_off = (void *)xmap - xmap_base;
@@ -515,18 +611,16 @@ static void *get_map(uint32_t pid, unsigned int *size)
 		xmap->start = start;
 		xmap->end = end;
 		xmap->offset = offset;
-		xmap->perm = perm;
 
 		xmap->flen = flen;
 		strncpy(xmap->fname, filename, flen);
 		xmap->fname[flen] = 0;
 
 #if 0
-fprintf(stderr, "start: %llx end: %llx offset: %llx perm: %02x flen: %u fname: %s\n",
+fprintf(stderr, "start: %llx end: %llx offset: %llx flen: %u fname: %s\n",
 		xmap->start,
 		xmap->end,
 		xmap->offset,
-		xmap->perm,
 		xmap->flen,
 		xmap->fname);
 #endif
@@ -675,13 +769,14 @@ static void handle_command(void)
 		void *xmap_base = NULL;
 		unsigned int xmap_size = 0;
 
-		xmap_base = get_map(cmd.pid, &xmap_size);
+		xmap_base = get_executable_mappings(cmd.pid, &xmap_size);
 
 		ret = TEMP_FAILURE_RETRY(sem_wait(&shm->sem));
 		if (!ret) {
 			MT_SEND_MSG(MT_XMAP, cmd.pid, cmd.tid, xmap_size, xmap_base, 0, NULL);
 			sem_post(&shm->sem);
 		}
+		free(xmap_base);
 		break;
 	 }
 	case MT_START:
@@ -730,7 +825,7 @@ static int app_start(char **argv)
 		prctl(PR_SET_PDEATHSIG, SIGKILL);
 
 		if (ptrace(PTRACE_TRACEME, 0, 0, 0) == -1)
-			fatal("ptrace TRACEME (%s)", strerror(errno));
+			fatal("%s:%d ptrace TRACEME (%s)", __FUNCTION__, __LINE__, strerror(errno));
 		raise(SIGSTOP);
 
 		execvp(*argv, argv);
@@ -754,10 +849,10 @@ static void server_run(void)
 		fatal("WIFEXITED");
 
 	if (ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEVFORKDONE) == -1)
-		fatal("ptrace SETOPTIONS (%s)", strerror(errno));
+		fatal("%s:%d ptrace SETOPTIONS (%s)", __FUNCTION__, __LINE__, strerror(errno));
 
 	if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
-		fatal("ptrace CONT (%s)", strerror(errno));
+		fatal("%s:%d ptrace CONT (%s)", __FUNCTION__, __LINE__, strerror(errno));
 
 	for (;;) {
 		int stop_sig = 0;
@@ -795,7 +890,7 @@ static void server_run(void)
 
 		if (ptrace(PTRACE_CONT, pid, 0, stop_sig) == -1) {
 			if (errno != ESRCH)
-				fatal("ptrace CONT (%s)", strerror(errno));
+				fatal("%s:%d ptrace CONT (%s)", __FUNCTION__, __LINE__, strerror(errno));
 		}
 	}
 

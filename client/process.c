@@ -72,7 +72,6 @@ struct map {
 	char *realpath;
 	struct bin_file *binfile;
 	int ignore;
-	unsigned char perm;
 };
 
 static unsigned long get_uint64(void *p)
@@ -179,18 +178,6 @@ static inline int memncmp(void *p1, uint32_t l1, void *p2, uint32_t l2)
 	if (l1 > l2)
 		return 1;
 	return 0;
-}
-
-static void process_walk_map(mt_process *process, unsigned char perm, void (*func)(struct map *, void *), void *user)
-{
-	struct list_head *pos;
-
-	for(pos = process->map_list.next; !list_is_last(pos, &process->map_list); pos = pos->next) {
-		struct map *map = (struct map *)pos;
-
-		if (map->perm & perm)
-			func(map, user);
-	}
 }
 
 static struct map *locate_map(mt_process *process, bfd_vma addr)
@@ -560,7 +547,7 @@ static int process_rb_insert_block(mt_process *process, unsigned long addr, unsi
 	return 0;
 }
 
-static struct map *_process_add_map(mt_process *process, unsigned long start, unsigned long end, unsigned long offset, const char *filename, unsigned char perm)
+static struct map *_process_add_map(mt_process *process, unsigned long start, unsigned long end, unsigned long offset, const char *filename)
 {
 	struct map *map = malloc(sizeof(*map));
 
@@ -571,10 +558,6 @@ static struct map *_process_add_map(mt_process *process, unsigned long start, un
 	map->realpath = NULL;
 	map->binfile = NULL;
 	map->ignore = 0;
-	map->perm = perm;
-
-	if (map->perm & PERM_W)
-		++process->write_maps;
 
 	list_add_tail(&map->list, &process->map_list);
 
@@ -583,9 +566,6 @@ static struct map *_process_add_map(mt_process *process, unsigned long start, un
 
 static void _process_del_map(mt_process *process, struct map *map)
 {
-	if (map->perm & PERM_W)
-		--process->write_maps;
-
 	bin_file_free(map->binfile);
 
 	list_del(&map->list);
@@ -619,16 +599,15 @@ void process_read_map(mt_process *process, void *data, uint32_t n)
 	process_release_map(process);
 
 	for(xmap = data; (void *)xmap - data < n; xmap = XMAP_NEXT(xmap, process->val16(xmap->flen) + 1)) {
-		struct map *map = _process_add_map(process, process->val64(xmap->start), process->val64(xmap->end), process->val64(xmap->offset), xmap->fname, xmap->perm);
+		struct map *map = _process_add_map(process, process->val64(xmap->start), process->val64(xmap->end), process->val64(xmap->offset), xmap->fname);
 
 		if (!map)
 			break;
 #if 0
-fprintf(stderr, "start: 0x%08llx len: 0x%08llx offset: 0x%08llx perm: %02x fname: %s\n",
+fprintf(stderr, "start: 0x%08llx len: 0x%08llx offset: 0x%08llx fname: %s\n",
 		map->start,
 		map->len,
 		map->offset,
-		map->perm,
 		map->fname);
 #endif
 	}
@@ -1159,7 +1138,6 @@ mt_process *process_new(pid_t pid, int swap_endian, int is_64bit)
 	memset(process, 0, sizeof(*process));
 
 	process->pid = pid;
-	process->write_maps = 0;
 	process->block_table = RB_ROOT;
 	process->stack_table = RB_ROOT;
 	INIT_LIST_HEAD(&process->map_list);
@@ -1253,26 +1231,6 @@ struct map_helper {
 	void *data;
 };
 
-static void set_map(struct map *map, void *data)
-{
-	struct map_helper *mh = data;
-
-	mh->process->put_ulong(mh->data, map->addr);
-	mh->data += mh->process->ptr_size;
-	
-	mh->process->put_ulong(mh->data, map->size);
-	mh->data += mh->process->ptr_size;
-}
-
-static void *prepare_maps(mt_process *process, void *data)
-{
-	struct map_helper mh = { .process = process, .data = data };
-
-	process_walk_map(process, PERM_W, set_map, &mh);
-
-	return mh.data;
-}
-
 static void set_block(struct rb_block *block, void *data)
 {
 	struct block_helper *bh = data;
@@ -1295,23 +1253,10 @@ static void set_block(struct rb_block *block, void *data)
 	bh->len++;
 }
 
-static void *prepare_blocks(mt_process *process, void *addr, unsigned long *n, unsigned long *mask, unsigned long fmask, unsigned long fmode)
-{
-	struct block_helper bh = { .process = process, .len = 0, .mask = ~0, .data = addr, .fmask = fmask | BLOCK_IGNORE, .fmode = fmode };
-
-	process_block_foreach(process, set_block, &bh);
-
-	*n = bh.len;
-	*mask = bh.mask;
-
-	return bh.data;
-}
-
 void process_leaks_scan(mt_server *server, mt_process *process, int mode)
 {
 	mt_scan_payload *payload;
 	unsigned int payload_len;
-	void *addr;
 	unsigned long n;
 	unsigned long mask;
 	unsigned long fmask;
@@ -1343,7 +1288,7 @@ void process_leaks_scan(mt_server *server, mt_process *process, int mode)
 	if (server_wait_op(server, MT_XMAP) == FALSE)
 		return;
 
-	payload_len = sizeof(*payload) + (process->n_allocations + process->write_maps * 2) * process->ptr_size;
+	payload_len = sizeof(*payload) + process->n_allocations * process->ptr_size;
 
 	payload = malloc(payload_len);
 	if (!payload) {
@@ -1352,25 +1297,26 @@ void process_leaks_scan(mt_server *server, mt_process *process, int mode)
 	}
 	memset(payload, 0, payload_len);
 
-	addr = payload->data;
-	addr = prepare_maps(process, addr);
-	addr = prepare_blocks(process, addr, &n, &mask, fmask, fmode);
+	struct block_helper bh = { .process = process, .len = 0, .mask = ~0, .data = payload->data, .fmask = fmask | BLOCK_IGNORE, .fmode = fmode };
+
+	process_block_foreach(process, set_block, &bh);
+
+	n = bh.len;
+	mask = bh.mask;
 
 	printf("scanning %lu allocations\n", n);
 	if (n) {
-		payload_len = sizeof(*payload) + (n + process->write_maps * 2) * process->ptr_size;
+		payload_len = sizeof(*payload) + n * process->ptr_size;
 
-		payload->maps = process->val32(process->write_maps);
 		payload->ptr_size = process->val32(process->ptr_size);
 		payload->mask = process->val64(mask);
 
 		if (MT_SEND_MSG(server, process, MT_SCAN, 0, payload_len, payload, 0, NULL) > 0)
 			server_wait_op(server, MT_SCAN);
-
-		free(payload);
 	}
 
-	if (MT_SEND_MSG(server, process, MT_CONT, 0, 0, NULL) <= 0)
-		return;
+	MT_SEND_MSG(server, process, MT_CONT, 0, 0, NULL);
+
+	free(payload);
 }
 

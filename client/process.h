@@ -47,7 +47,6 @@ struct _mt_process {
 	struct rb_root block_table;
 	struct rb_root stack_table;
 	struct list_head map_list;
-	unsigned int write_maps;
 	unsigned long long tsc;
 	int swap_endian;
 	int is_64bit;

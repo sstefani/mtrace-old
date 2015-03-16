@@ -99,12 +99,10 @@ struct __attribute__((packed)) xmap {
 	uint64_t end;
 	uint64_t offset;
 	uint16_t flen;
-	uint8_t perm;
 	char fname[0];
 };
 
 struct _mt_scan_payload {
-	uint32_t maps;
 	uint32_t ptr_size;
 	uint64_t mask;
 	char data[0];
